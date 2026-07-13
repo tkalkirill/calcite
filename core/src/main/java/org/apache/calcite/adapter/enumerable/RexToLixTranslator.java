@@ -153,6 +153,8 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
    * For {@code RexLiteral} and {@code RexCall}. */
   private final Map<RexNode, Result> rexResultMap = new HashMap<>();
 
+  private final @Nullable CallResultProvider callResultProvider;
+
   private @Nullable Type currentStorageType;
 
   private RexToLixTranslator(@Nullable RexProgram program,
@@ -163,7 +165,8 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       @Nullable BlockBuilder staticList,
       RexBuilder builder,
       SqlConformance conformance,
-      @Nullable Function1<String, InputGetter> correlates) {
+      @Nullable Function1<String, InputGetter> correlates,
+      @Nullable CallResultProvider callResultProvider) {
     this.program = program; // may be null
     this.typeFactory = requireNonNull(typeFactory, "typeFactory");
     this.conformance = requireNonNull(conformance, "conformance");
@@ -173,6 +176,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     this.staticList = staticList;
     this.builder = requireNonNull(builder, "builder");
     this.correlates = correlates; // may be null
+    this.callResultProvider = callResultProvider;
   }
 
   /**
@@ -205,7 +209,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       }
     }
     return new RexToLixTranslator(program, typeFactory, root, inputGetter,
-        list, staticList, new RexBuilder(typeFactory), conformance,  null)
+        list, staticList, new RexBuilder(typeFactory), conformance, null, null)
         .setCorrelates(correlates)
         .translateList(program.getProjectList(), storageTypes);
   }
@@ -225,7 +229,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       PhysType inputPhysType, PhysType outputPhysType) {
     final RexToLixTranslator translator =
         new RexToLixTranslator(null, typeFactory, root, null, list,
-            null, new RexBuilder(typeFactory), conformance, null);
+            null, new RexBuilder(typeFactory), conformance, null, null);
     return translator
         .translateTableFunction(rexCall, inputEnumerable, inputPhysType,
             outputPhysType);
@@ -237,7 +241,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       SqlConformance conformance) {
     final ParameterExpression root = DataContext.ROOT;
     return new RexToLixTranslator(null, typeFactory, root, inputGetter, list,
-        null, new RexBuilder(typeFactory), conformance, null);
+        null, new RexBuilder(typeFactory), conformance, null, null);
   }
 
   Expression translate(RexNode expr) {
@@ -1243,7 +1247,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
     final ParameterExpression root = DataContext.ROOT;
     RexToLixTranslator translator =
         new RexToLixTranslator(program, typeFactory, root, inputGetter, list,
-            null, new RexBuilder(typeFactory), conformance, null);
+            null, new RexBuilder(typeFactory), conformance, null, null);
     translator = translator.setCorrelates(correlates);
     return translator.translate(
         condition,
@@ -1264,7 +1268,7 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       return this;
     }
     return new RexToLixTranslator(program, typeFactory, root, inputGetter, list,
-        staticList, builder, conformance, correlates);
+        staticList, builder, conformance, correlates, callResultProvider);
   }
 
   public RexToLixTranslator setCorrelates(
@@ -1273,7 +1277,16 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       return this;
     }
     return new RexToLixTranslator(program, typeFactory, root, inputGetter, list,
-        staticList, builder, conformance, correlates);
+        staticList, builder, conformance, correlates, callResultProvider);
+  }
+
+  RexToLixTranslator setCallResultProvider(
+      @Nullable CallResultProvider callResultProvider) {
+    if (this.callResultProvider == callResultProvider) {
+      return this;
+    }
+    return new RexToLixTranslator(program, typeFactory, root, inputGetter, list,
+        staticList, builder, conformance, correlates, callResultProvider);
   }
 
   public Expression getRoot() {
@@ -1482,6 +1495,13 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
   @Override public Result visitCall(RexCall call) {
     if (rexResultMap.containsKey(call)) {
       return rexResultMap.get(call);
+    }
+    if (callResultProvider != null) {
+      final @Nullable Result provided = callResultProvider.implement(this, call);
+      if (provided != null) {
+        rexResultMap.put(call, provided);
+        return provided;
+      }
     }
     final SqlOperator operator = call.getOperator();
     if (operator == PREV) {
@@ -1877,6 +1897,10 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
         () -> "callOperandResultMap.get(call) for " + call);
   }
 
+  void setCallOperandResult(RexCall call, List<Result> operandResults) {
+    callOperandResultMap.put(call, operandResults);
+  }
+
   /** Returns an expression that yields the function object whose method
    * we are about to call.
    *
@@ -2004,5 +2028,10 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
       this.isNullVariable = isNullVariable;
       this.valueVariable = valueVariable;
     }
+  }
+
+  /** Provides custom generated results for selected calls. */
+  interface CallResultProvider {
+    @Nullable Result implement(RexToLixTranslator translator, RexCall call);
   }
 }

@@ -1325,9 +1325,44 @@ public class SqlToRelConverter {
     replaceSubQueries(bb, newWhere, RelOptUtil.Logic.UNKNOWN_AS_FALSE);
     final RexNode convertedWhere = bb.convertExpression(newWhere);
     final RexNode convertedWhere2 = simplifyPredicate(convertedWhere);
+    final List<RelNode> cursorInputs = bb.retrieveCursors();
 
     // only allocate filter if the condition is not TRUE
     if (convertedWhere2.isAlwaysTrue()) {
+      return;
+    }
+
+    if (!cursorInputs.isEmpty()) {
+      final RelNode input = bb.root();
+      final List<RelNode> inputs = new ArrayList<>();
+      inputs.add(input);
+      inputs.addAll(cursorInputs);
+      final List<RexNode> exprs = new ArrayList<>();
+      final RelDataType inputRowType = input.getRowType();
+      for (int i = 0; i < inputRowType.getFieldCount(); i++) {
+        exprs.add(rexBuilder.makeInputRef(input, i));
+      }
+      exprs.add(convertedWhere2);
+      final RelDataType cursorFilterRowType =
+          typeFactory.builder()
+              .addAll(inputRowType.getFieldList())
+              .add("$condition", convertedWhere2.getType())
+              .build();
+      RelNode r = LogicalTableFunctionScan.create(cluster, inputs,
+          rexBuilder.makeCall(cursorFilterRowType, SqlStdOperatorTable.ROW,
+              exprs),
+          null, cursorFilterRowType, ImmutableSet.of());
+      r = RelFactories.DEFAULT_FILTER_FACTORY.createFilter(r,
+          rexBuilder.makeInputRef(r, inputRowType.getFieldCount()),
+          ImmutableSet.of());
+      final List<RexNode> projects = new ArrayList<>();
+      for (int i = 0; i < inputRowType.getFieldCount(); i++) {
+        projects.add(rexBuilder.makeInputRef(r, i));
+      }
+      bb.setRoot(
+          LogicalProject.create(r, ImmutableList.of(), projects,
+              inputRowType.getFieldNames(), ImmutableSet.of()),
+          false);
       return;
     }
 
@@ -5154,8 +5189,21 @@ public class SqlToRelConverter {
             ImmutableSet.of());
 
     final RelNode r;
+    final List<RelNode> cursorInputs = bb.retrieveCursors();
     final CorrelationUse p = getCorrelationUse(bb, project);
-    if (p != null) {
+    if (!cursorInputs.isEmpty()) {
+      final List<RelNode> inputs = new ArrayList<>();
+      if (select.getFrom() != null) {
+        inputs.add(bb.root());
+      }
+      inputs.addAll(cursorInputs);
+      final RexCall call = (RexCall) (exprs.size() == 1
+          ? exprs.get(0)
+          : rexBuilder.makeCall(project.getRowType(), SqlStdOperatorTable.ROW,
+              exprs));
+      r = LogicalTableFunctionScan.create(cluster, inputs,
+          call, null, project.getRowType(), ImmutableSet.of());
+    } else if (p != null) {
       assert p.r instanceof Project;
       // correlation variables have been normalized in p.r, we should use expressions
       // in p.r instead of the original exprs

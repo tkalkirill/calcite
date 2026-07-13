@@ -19,6 +19,7 @@ package org.apache.calcite.test;
 import org.apache.calcite.adapter.enumerable.CallImplementor;
 import org.apache.calcite.adapter.java.ReflectiveSchema;
 import org.apache.calcite.jdbc.CalciteConnection;
+import org.apache.calcite.linq4j.Enumerable;
 import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.linq4j.function.SemiStrict;
 import org.apache.calcite.linq4j.tree.Expressions;
@@ -40,15 +41,19 @@ import org.apache.calcite.util.Smalls;
 
 import com.google.common.collect.ImmutableList;
 
+import org.checkerframework.checker.nullness.qual.Nullable;
+
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -299,6 +304,130 @@ class UdfTest {
         + "P=41\n"
         + "P=41\n";
     withUdf().query(sql3).returns(expected3);
+  }
+
+  @Test void testUserDefinedFunctionWithCursor() throws Exception {
+    try (Connection connection = DriverManager.getConnection("jdbc:calcite:")) {
+      CalciteConnection calciteConnection =
+          connection.unwrap(CalciteConnection.class);
+      SchemaPlus rootSchema = calciteConnection.getRootSchema();
+      rootSchema.add("sales", new ReflectiveSchema(new SalesSchema()));
+
+      SchemaPlus post = rootSchema.add("POST", new AbstractSchema());
+      post.add("MEDIAN_COST",
+          ScalarFunctionImpl.create(MedianCostFunction.class, "eval"));
+      post.add("MEDIAN_COST_PLUS",
+          ScalarFunctionImpl.create(MedianCostPlusFunction.class, "eval"));
+
+      final String sql = "select \"POST\".\"MEDIAN_COST\"(\n"
+          + "  cursor(select \"cost\" from \"sales\".\"sales\")) as m";
+      try (PreparedStatement ps = connection.prepareStatement(sql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet), is("M=30.0\n"));
+      }
+
+      final String sqlWithLiteral = "select \"POST\".\"MEDIAN_COST_PLUS\"(\n"
+          + "  cursor(select \"cost\" from \"sales\".\"sales\"), 5) as m";
+      try (PreparedStatement ps = connection.prepareStatement(sqlWithLiteral);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet), is("M=35.0\n"));
+      }
+    }
+  }
+
+  @Test void testUserDefinedFunctionWithCursorAndFrom() throws Exception {
+    try (Connection connection = DriverManager.getConnection("jdbc:calcite:")) {
+      CalciteConnection calciteConnection =
+          connection.unwrap(CalciteConnection.class);
+      SchemaPlus rootSchema = calciteConnection.getRootSchema();
+      rootSchema.add("sales", new ReflectiveSchema(new SalesSchema()));
+
+      SchemaPlus post = rootSchema.add("POST", new AbstractSchema());
+      post.add("MEDIAN_COST",
+          ScalarFunctionImpl.create(MedianCostFunction.class, "eval"));
+      post.add("FAILING_CURSOR",
+          ScalarFunctionImpl.create(FailingCursorFunction.class, "eval"));
+
+      final String sql = "select \"deptno\", \"POST\".\"MEDIAN_COST\"(\n"
+          + "  cursor(select \"cost\" from \"sales\".\"sales\"\n"
+          + "    where \"sales\".\"sales\".\"deptno\" = \"depts\".\"deptno\")) as m\n"
+          + "from \"sales\".\"depts\"";
+      try (PreparedStatement ps = connection.prepareStatement(sql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet),
+            is("deptno=10; M=20.0\n"
+                + "deptno=20; M=110.0\n"));
+      }
+
+      final String nestedSql = "select \"deptno\", \"POST\".\"MEDIAN_COST\"(\n"
+          + "  cursor(select \"cost\" from \"sales\".\"sales\"\n"
+          + "    where \"sales\".\"sales\".\"deptno\" = \"depts\".\"deptno\"\n"
+          + "      and \"depts\".\"deptno\" = 10)) + 1 as m\n"
+          + "from \"sales\".\"depts\"";
+      try (PreparedStatement ps = connection.prepareStatement(nestedSql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet),
+            is("deptno=10; M=21.0\n"
+                + "deptno=20; M=null\n"));
+      }
+
+      final String nestedFunctionSql = "select \"deptno\", abs(\"POST\".\"MEDIAN_COST\"(\n"
+          + "  cursor(select \"cost\" from \"sales\".\"sales\"\n"
+          + "    where \"sales\".\"sales\".\"deptno\" = \"depts\".\"deptno\"))) as m\n"
+          + "from \"sales\".\"depts\"";
+      try (PreparedStatement ps = connection.prepareStatement(nestedFunctionSql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet),
+            is("deptno=10; M=20.0\n"
+                + "deptno=20; M=110.0\n"));
+      }
+
+      final String filterSql = "select \"deptno\"\n"
+          + "from \"sales\".\"depts\"\n"
+          + "where \"POST\".\"MEDIAN_COST\"(\n"
+          + "  cursor(select \"cost\" from \"sales\".\"sales\"\n"
+          + "    where \"sales\".\"sales\".\"deptno\" = \"depts\".\"deptno\")) > 50.0";
+      try (PreparedStatement ps = connection.prepareStatement(filterSql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet),
+            is("deptno=20\n"));
+      }
+
+      final String alwaysTrueFilterSql = filterSql + "\n"
+          + "or true";
+      try (PreparedStatement ps = connection.prepareStatement(alwaysTrueFilterSql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet),
+            is("deptno=10\n"
+                + "deptno=20\n"));
+      }
+
+      final String caseSql = "select \"deptno\", case when 1 = 0 then\n"
+          + "  \"POST\".\"FAILING_CURSOR\"(\n"
+          + "    cursor(select \"cost\" from \"sales\".\"sales\"\n"
+          + "      where \"sales\".\"sales\".\"deptno\" = \"depts\".\"deptno\"))\n"
+          + "  else 7.0 end as m\n"
+          + "from \"sales\".\"depts\"";
+      try (PreparedStatement ps = connection.prepareStatement(caseSql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet),
+            is("deptno=10; M=7.0\n"
+                + "deptno=20; M=7.0\n"));
+      }
+
+      final String multiLevelSql = "select \"deptno\", (\n"
+          + "  select \"m\" from (\n"
+          + "    select \"POST\".\"MEDIAN_COST\"(\n"
+          + "      cursor(select \"cost\" from \"sales\".\"sales\"\n"
+          + "        where \"sales\".\"sales\".\"deptno\" = \"depts\".\"deptno\")) as \"m\")) as m\n"
+          + "from \"sales\".\"depts\"";
+      try (PreparedStatement ps = connection.prepareStatement(multiLevelSql);
+           ResultSet resultSet = ps.executeQuery()) {
+        assertThat(CalciteAssert.toString(resultSet),
+            is("deptno=10; M=20.0\n"
+                + "deptno=20; M=110.0\n"));
+      }
+    }
   }
 
   /** Test case for
@@ -1150,6 +1279,80 @@ class UdfTest {
     final String testString = "abc";
     String sql = "values \"adhoc\".characterarray('" + testString + "')";
     withUdf().query(sql).typeIs("[EXPR$0 VARCHAR]");
+  }
+
+  /** Test schema with sales costs. */
+  public static class SalesSchema {
+    public final Sale[] sales = {
+        new Sale(10, 10d),
+        new Sale(10, 30d),
+        new Sale(10, 20d),
+        new Sale(20, 100d),
+        new Sale(20, 120d)
+    };
+    public final Dept[] depts = {
+        new Dept(10),
+        new Dept(20)
+    };
+  }
+
+  /** Sale row for {@link SalesSchema}. */
+  public static class Sale {
+    public final int deptno;
+    public final double cost;
+
+    Sale(int deptno, double cost) {
+      this.deptno = deptno;
+      this.cost = cost;
+    }
+  }
+
+  /** Department row for {@link SalesSchema}. */
+  public static class Dept {
+    public final int deptno;
+
+    Dept(int deptno) {
+      this.deptno = deptno;
+    }
+  }
+
+  /** UDF that computes the median cost from a cursor over a cost column. */
+  public static class MedianCostFunction {
+    public static Double eval(Enumerable<?> rows) {
+      return medianCost(rows);
+    }
+  }
+
+  /** UDF that computes the median cost from a cursor and adds an offset. */
+  public static class MedianCostPlusFunction {
+    public static Double eval(Enumerable<?> rows, int offset) {
+      final Double median = medianCost(rows);
+      return median == null ? null : median + offset;
+    }
+  }
+
+  /** UDF that fails if a short-circuited cursor call is evaluated. */
+  public static class FailingCursorFunction {
+    public static Double eval(Enumerable<?> rows) {
+      throw new AssertionError("Unexpected cursor UDF evaluation");
+    }
+  }
+
+  private static @Nullable Double medianCost(Enumerable<?> rows) {
+    final List<Double> costs = new ArrayList<>();
+    for (Object row : rows) {
+      final Object cost = row instanceof Object[] ? ((Object[]) row)[0] : row;
+      costs.add(((Number) cost).doubleValue());
+    }
+    if (costs.isEmpty()) {
+      return null;
+    }
+    Collections.sort(costs);
+    final int middle = costs.size() / 2;
+    if (costs.size() % 2 == 1) {
+      return costs.get(middle);
+    }
+    return (costs.get(middle - 1) + costs.get(middle)) / 2d;
   }
 
   /**
