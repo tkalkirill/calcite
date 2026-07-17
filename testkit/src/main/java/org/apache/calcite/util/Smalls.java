@@ -62,6 +62,7 @@ import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.dialect.CalciteSqlDialect;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.util.CursorInput;
 
 import com.google.common.collect.ImmutableList;
 
@@ -133,10 +134,13 @@ public class Smalls {
           Queryable.class);
   public static final Method PROCESS_CURSOR_METHOD =
       Types.lookupMethod(Smalls.class, "processCursor",
-          int.class, Enumerable.class);
+          int.class, CursorInput.class, int.class);
+  public static final Method PROCESS_CURSOR_WITH_NUMBER_METHOD =
+      Types.lookupMethod(Smalls.class, "processCursorWithNumber",
+          CursorInput.class, Integer.class);
   public static final Method PROCESS_CURSORS_METHOD =
       Types.lookupMethod(Smalls.class, "processCursors",
-          int.class, Enumerable.class, Enumerable.class);
+          int.class, CursorInput.class, CursorInput.class);
   public static final Method MY_PLUS_EVAL_METHOD =
       Types.lookupMethod(MyPlusFunction.class, "eval", int.class, int.class);
   public static final Method MY_PLUS_INIT_EVAL_METHOD =
@@ -433,9 +437,10 @@ public class Smalls {
     }
   }
 
-  /** Table function that adds a number to the first column of input cursor. */
+  /** Table function that scales the first column of an input cursor and adds
+   * an offset. */
   public static QueryableTable processCursor(final int offset,
-      final Enumerable<Object[]> a) {
+      final CursorInput a, final int multiplier) {
     return new AbstractQueryableTable(Object[].class) {
       @Override public RelDataType getRowType(RelDataTypeFactory typeFactory) {
         return typeFactory.builder()
@@ -445,20 +450,49 @@ public class Smalls {
 
       @Override public <T> Queryable<T> asQueryable(QueryProvider queryProvider,
           SchemaPlus schema, String tableName) {
+        final int valueIndex =
+            requireNonNull(a.getRowType().getField("n", true, false), "n")
+                .getIndex();
         final Enumerable<Integer> enumerable =
-            a.select(a0 -> offset + ((Integer) a0[0]));
+            a.rows().select(a0 ->
+                offset + multiplier * ((Integer) a0[valueIndex]));
         //noinspection unchecked
         return (Queryable) enumerable.asQueryable();
       }
     };
   }
 
+  /** Table function that returns a cursor value and that value plus a number. */
+  public static QueryableTable processCursorWithNumber(final CursorInput input,
+      final Integer number) {
+    return new AbstractQueryableTable(Object[].class) {
+      @Override public RelDataType getRowType(RelDataTypeFactory typeFactory) {
+        return typeFactory.builder()
+            .add("cursor_value", SqlTypeName.INTEGER)
+            .add("result_value", SqlTypeName.INTEGER)
+            .build();
+      }
+
+      @Override public Queryable<Object[]> asQueryable(QueryProvider queryProvider,
+          SchemaPlus schema, String tableName) {
+        final int valueIndex =
+            requireNonNull(input.getRowType().getField("n", true, false), "n")
+                .getIndex();
+        return input.rows()
+            .select(row -> {
+              final int value = (Integer) row[valueIndex];
+              return new Object[] {value, value + number};
+            })
+            .asQueryable();
+      }
+    };
+  }
+
   /**
-   * A function that sums the second column of first input cursor, second
-   * column of first input and the given int.
+   * A function that sums numeric columns of two input cursors and an offset.
    */
   public static QueryableTable processCursors(final int offset,
-      final Enumerable<Object[]> a, final Enumerable<IntString> b) {
+      final CursorInput a, final CursorInput b) {
     return new AbstractQueryableTable(Object[].class) {
       @Override public RelDataType getRowType(RelDataTypeFactory typeFactory) {
         return typeFactory.builder()
@@ -468,8 +502,17 @@ public class Smalls {
 
       @Override public <T> Queryable<T> asQueryable(QueryProvider queryProvider,
           SchemaPlus schema, String tableName) {
+        final int leftIndex =
+            requireNonNull(a.getRowType().getField("c1", true, false), "c1")
+                .getIndex();
+        final int rightIndex =
+            requireNonNull(b.getRowType().getField("n", true, false), "n")
+                .getIndex();
         final Enumerable<Integer> enumerable =
-            a.zip(b, (v0, v1) -> ((Integer) v0[1]) + v1.n + offset);
+            a.rows().zip(b.rows(),
+                (v0, v1) ->
+                    ((Integer) v0[leftIndex]) + ((Integer) v1[rightIndex])
+                        + offset);
         //noinspection unchecked
         return (Queryable) enumerable.asQueryable();
       }

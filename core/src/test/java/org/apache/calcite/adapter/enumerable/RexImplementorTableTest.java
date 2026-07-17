@@ -20,15 +20,25 @@ import org.apache.calcite.DataContext;
 import org.apache.calcite.adapter.enumerable.RexImpTable.RexCallImplementor;
 import org.apache.calcite.adapter.java.JavaTypeFactory;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
+import org.apache.calcite.linq4j.Enumerable;
+import org.apache.calcite.linq4j.Linq4j;
+import org.apache.calcite.linq4j.QueryProvider;
 import org.apache.calcite.linq4j.tree.BlockBuilder;
 import org.apache.calcite.linq4j.tree.Expression;
 import org.apache.calcite.linq4j.tree.Expressions;
+import org.apache.calcite.plan.ConventionTraitDef;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
 import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
 import org.apache.calcite.rex.RexProgramBuilder;
+import org.apache.calcite.runtime.Bindable;
+import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlAggFunction;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
@@ -40,18 +50,27 @@ import org.apache.calcite.sql.fun.SqlBasicAggFunction;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.OperandTypes;
 import org.apache.calcite.sql.type.ReturnTypes;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.validate.SqlConformanceEnum;
+import org.apache.calcite.test.MockSqlOperatorTable;
+
+import com.google.common.collect.ImmutableList;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Type;
+import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -141,6 +160,76 @@ class RexImplementorTableTest {
             RexImpTable.instance());
     assertThat(chain.get(MY_FN), is(sameInstance(SENTINEL)));
     assertThat(chain.get(SqlStdOperatorTable.UPPER), is(notNullValue()));
+  }
+
+  /** Executes a table function with a cursor using an implementor supplied by
+   * an extension table. */
+  @Test void executesTableFunctionWithCursorFromExtensionTable() {
+    final JavaTypeFactoryImpl typeFactory =
+        new JavaTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
+    final RexBuilder rexBuilder = new RexBuilder(typeFactory);
+    final VolcanoPlanner planner = new VolcanoPlanner();
+    planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
+    final RelOptCluster cluster = RelOptCluster.create(planner, rexBuilder);
+    final RelDataType inputRowType =
+        typeFactory.builder().add("n", SqlTypeName.INTEGER).build();
+    final RelDataType integerType = inputRowType.getFieldList().get(0).getType();
+    final ImmutableList<ImmutableList<RexLiteral>> tuples =
+        ImmutableList.of(
+            ImmutableList.of(rexBuilder.makeExactLiteral(BigDecimal.ZERO,
+                integerType)),
+            ImmutableList.of(rexBuilder.makeExactLiteral(BigDecimal.ONE,
+                integerType)),
+            ImmutableList.of(rexBuilder.makeExactLiteral(BigDecimal.valueOf(2),
+                integerType)));
+    final EnumerableValues input =
+        EnumerableValues.create(cluster, inputRowType, tuples);
+    final MockSqlOperatorTable.CursorAndNumberTableFunction operator =
+        new MockSqlOperatorTable.CursorAndNumberTableFunction();
+    final RexNode cursor =
+        rexBuilder.makeCall(SqlStdOperatorTable.CURSOR,
+            rexBuilder.makeInputRef(inputRowType, 0));
+    final RexCall call =
+        (RexCall) rexBuilder.makeCall(operator, cursor,
+            rexBuilder.makeExactLiteral(BigDecimal.TEN, integerType));
+    final RelDataType outputRowType = typeFactory.builder()
+        .add("CURSOR_VALUE", SqlTypeName.INTEGER)
+        .add("NUMBER_VALUE", SqlTypeName.INTEGER)
+        .build();
+    final EnumerableTableFunctionScan scan =
+        new EnumerableTableFunctionScan(cluster,
+            cluster.traitSetOf(EnumerableConvention.INSTANCE),
+            ImmutableList.of(input), Object[].class, outputRowType, call, null);
+    final RexImplementorTable implementorTable =
+        RexImplementorTables.chain(
+            new SingleScalarTable(operator, operator.implementor()),
+            RexImpTable.instance());
+    final Map<String, Object> parameters = new HashMap<>();
+    parameters.put("_rexImplementorTable", implementorTable);
+
+    final Bindable<Object[]> bindable =
+        EnumerableInterpretable.toBindable(parameters, null, scan,
+            EnumerableRel.Prefer.ARRAY);
+    final DataContext dataContext = new DataContext() {
+      @Override public @Nullable SchemaPlus getRootSchema() {
+        return null;
+      }
+
+      @Override public JavaTypeFactory getTypeFactory() {
+        return typeFactory;
+      }
+
+      @Override public QueryProvider getQueryProvider() {
+        return Linq4j.DEFAULT_PROVIDER;
+      }
+
+      @Override public @Nullable Object get(String name) {
+        return parameters.get(name);
+      }
+    };
+    final Enumerable<Object[]> rows = bindable.bind(dataContext);
+    assertThat(rows.select(Arrays::toString).toList(),
+        contains("[0, 10]", "[1, 11]", "[2, 12]"));
   }
 
   /** A table earlier in the chain overrides a built-in implementor. */

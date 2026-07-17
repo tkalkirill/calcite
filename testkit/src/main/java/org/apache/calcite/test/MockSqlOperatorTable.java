@@ -16,8 +16,12 @@
  */
 package org.apache.calcite.test;
 
+import org.apache.calcite.adapter.enumerable.RexImpTable;
+import org.apache.calcite.adapter.enumerable.RexImpTable.RexCallImplementor;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.schema.ImplementableFunction;
+import org.apache.calcite.schema.impl.TableFunctionImpl;
 import org.apache.calcite.sql.SqlAggFunction;
 import org.apache.calcite.sql.SqlBasicFunction;
 import org.apache.calcite.sql.SqlCallBinding;
@@ -49,6 +53,7 @@ import org.apache.calcite.sql.util.ChainedSqlOperatorTable;
 import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.util.Optionality;
+import org.apache.calcite.util.Smalls;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -59,6 +64,8 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.util.List;
 import java.util.Map;
+
+import static java.util.Objects.requireNonNull;
 
 /**
  * Mock operator table for testing purposes. Contains the standard SQL operator
@@ -134,6 +141,33 @@ public class MockSqlOperatorTable extends ChainedSqlOperatorTable {
       return opBinding -> opBinding.getTypeFactory().builder()
           .add("I", SqlTypeName.INTEGER)
           .build();
+    }
+  }
+
+  /** Table function that takes a cursor and a number and returns two columns. */
+  public static class CursorAndNumberTableFunction extends SqlFunction
+      implements SqlTableFunction {
+    private static final ImplementableFunction FUNCTION =
+        (ImplementableFunction) requireNonNull(
+            TableFunctionImpl.create(Smalls.PROCESS_CURSOR_WITH_NUMBER_METHOD),
+            "table function");
+
+    public CursorAndNumberTableFunction() {
+      super("CURSOR_AND_NUMBER", SqlKind.OTHER_FUNCTION, ReturnTypes.CURSOR,
+          null,
+          OperandTypes.family(SqlTypeFamily.CURSOR, SqlTypeFamily.INTEGER),
+          SqlFunctionCategory.USER_DEFINED_TABLE_FUNCTION);
+    }
+
+    @Override public SqlReturnTypeInference getRowTypeInference() {
+      return opBinding -> opBinding.getTypeFactory().builder()
+          .add("CURSOR_VALUE", SqlTypeName.INTEGER)
+          .add("NUMBER_VALUE", SqlTypeName.INTEGER)
+          .build();
+    }
+
+    public RexCallImplementor implementor() {
+      return RexImpTable.wrapAsRexCallImplementor(FUNCTION.getImplementor());
     }
   }
 

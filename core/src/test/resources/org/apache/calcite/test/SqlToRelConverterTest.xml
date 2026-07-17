@@ -886,6 +886,19 @@ LogicalProject(I=[$0])
 ]]>
     </Resource>
   </TestCase>
+  <TestCase name="testCollectionTableWithCursorAndScalarParam">
+    <Resource name="sql">
+      <![CDATA[select * from table(cursor_and_number(cursor(select empno from emp), 10))]]>
+    </Resource>
+    <Resource name="plan">
+      <![CDATA[
+LogicalProject(CURSOR_VALUE=[$0], NUMBER_VALUE=[$1])
+  LogicalTableFunctionScan(invocation=[CURSOR_AND_NUMBER(CAST($0):CURSOR NOT NULL, 10)], rowType=[RecordType(INTEGER CURSOR_VALUE, INTEGER NUMBER_VALUE)])
+    LogicalProject(EMPNO=[$0])
+      LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+    </Resource>
+  </TestCase>
   <TestCase name="testCollectionTableWithCursorParam">
     <Resource name="sql">
       <![CDATA[select * from table(dedup(cursor(select ename from emp), cursor(select name from dept), 'NAME'))]]>

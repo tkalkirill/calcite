@@ -265,10 +265,19 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
   public static RexToLixTranslator forAggregation(JavaTypeFactory typeFactory,
       BlockBuilder list, @Nullable InputGetter inputGetter,
       SqlConformance conformance) {
+    return forAggregation(typeFactory, list, inputGetter, conformance,
+        RexImpTable.INSTANCE);
+  }
+
+  /** Creates a translator for translating aggregate functions using a given
+   * implementor table. */
+  public static RexToLixTranslator forAggregation(JavaTypeFactory typeFactory,
+      BlockBuilder list, @Nullable InputGetter inputGetter,
+      SqlConformance conformance, RexImplementorTable implementorTable) {
     final ParameterExpression root = DataContext.ROOT;
     return new RexToLixTranslator(null, typeFactory, root, inputGetter, list,
         null, new RexBuilder(typeFactory), conformance, null,
-        RexImpTable.INSTANCE);
+        implementorTable);
   }
 
   Expression translate(RexNode expr) {
@@ -1942,6 +1951,10 @@ public class RexToLixTranslator implements RexVisitor<RexToLixTranslator.Result>
   List<Result> getCallOperandResult(RexCall call) {
     return requireNonNull(callOperandResultMap.get(call),
         () -> "callOperandResultMap.get(call) for " + call);
+  }
+
+  void setCallOperandResult(RexCall call, List<Result> operandResults) {
+    callOperandResultMap.put(call, operandResults);
   }
 
   /** Returns an expression that yields the function object whose method

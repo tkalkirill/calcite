@@ -317,8 +317,6 @@ class TableFunctionTest {
   /**
    * Tests a table function that takes cursor input.
    */
-  @Disabled("CannotPlanException: Node [rel#18:Subset#4.ENUMERABLE.[]] "
-      + "could not be implemented")
   @Test void testTableFunctionCursorInputs() throws SQLException {
     try (Connection connection =
              DriverManager.getConnection("jdbc:calcite:")) {
@@ -334,7 +332,8 @@ class TableFunctionTest {
       schema.add("process", add);
       final PreparedStatement ps = connection.prepareStatement("select *\n"
           + "from table(\"s\".\"process\"(2,\n"
-          + "cursor(select * from table(\"s\".\"GenerateStrings\"(?)))\n"
+          + "cursor(select * from table(\"s\".\"GenerateStrings\"(?))),\n"
+          + "1\n"
           + ")) as t(u)\n"
           + "where u > 3");
       ps.setInt(1, 5);
@@ -342,17 +341,74 @@ class TableFunctionTest {
       // GenerateStrings returns 0..4, then 2 is added (process function),
       // thus 2..6, finally where u > 3 leaves just 4..6
       assertThat(CalciteAssert.toString(resultSet),
-          equalTo("u=4\n"
-              + "u=5\n"
-              + "u=6\n"));
+          equalTo("U=4\n"
+              + "U=5\n"
+              + "U=6\n"));
+    }
+  }
+
+  /** Tests the result of a two-column table function that takes a cursor and
+   * a scalar argument. */
+  @Test void testTableFunctionCursorAndNumberResult() throws SQLException {
+    try (Connection connection =
+             DriverManager.getConnection("jdbc:calcite:")) {
+      final CalciteConnection calciteConnection =
+          connection.unwrap(CalciteConnection.class);
+      final SchemaPlus schema =
+          calciteConnection.getRootSchema().add("s", new AbstractSchema());
+      schema.add("GenerateStrings",
+          TableFunctionImpl.create(Smalls.GENERATE_STRINGS_METHOD));
+      schema.add("process",
+          TableFunctionImpl.create(Smalls.PROCESS_CURSOR_WITH_NUMBER_METHOD));
+
+      final String sql = "select *\n"
+          + "from table(\"s\".\"process\"(\n"
+          + "cursor(select * from table(\"s\".\"GenerateStrings\"(3))),\n"
+          + "10))";
+      try (Statement statement = connection.createStatement();
+           ResultSet resultSet = statement.executeQuery(sql)) {
+        assertThat(CalciteAssert.toString(resultSet),
+            equalTo("cursor_value=0; result_value=10\n"
+                + "cursor_value=1; result_value=11\n"
+                + "cursor_value=2; result_value=12\n"));
+      }
+    }
+  }
+
+  /** Tests a cursor table function whose scalar argument references an outer
+   * row. */
+  @Test void testTableFunctionCursorAndCorrelatedNumberResult()
+      throws SQLException {
+    try (Connection connection =
+             DriverManager.getConnection("jdbc:calcite:")) {
+      final CalciteConnection calciteConnection =
+          connection.unwrap(CalciteConnection.class);
+      final SchemaPlus schema =
+          calciteConnection.getRootSchema().add("s", new AbstractSchema());
+      schema.add("GenerateStrings",
+          TableFunctionImpl.create(Smalls.GENERATE_STRINGS_METHOD));
+      schema.add("process",
+          TableFunctionImpl.create(Smalls.PROCESS_CURSOR_WITH_NUMBER_METHOD));
+
+      final String sql = "select *\n"
+          + "from (values (10), (20)) as d(n)\n"
+          + "cross join lateral table(\"s\".\"process\"(\n"
+          + "cursor(select * from table(\"s\".\"GenerateStrings\"(2))),\n"
+          + "d.n))";
+      try (Statement statement = connection.createStatement();
+           ResultSet resultSet = statement.executeQuery(sql)) {
+        assertThat(CalciteAssert.toString(resultSet),
+            equalTo("N=10; cursor_value=0; result_value=10\n"
+                + "N=10; cursor_value=1; result_value=11\n"
+                + "N=20; cursor_value=0; result_value=20\n"
+                + "N=20; cursor_value=1; result_value=21\n"));
+      }
     }
   }
 
   /**
    * Tests a table function that takes multiple cursor inputs.
    */
-  @Disabled("CannotPlanException: Node [rel#24:Subset#6.ENUMERABLE.[]] "
-      + "could not be implemented")
   @Test void testTableFunctionCursorsInputs() throws SQLException {
     try (Connection connection = getConnectionWithMultiplyFunction()) {
       CalciteConnection calciteConnection =
@@ -375,15 +431,12 @@ class TableFunctionTest {
       ResultSet resultSet = ps.executeQuery();
       // GenerateStrings produce 0..4
       // multiplication produce 1..5
-      // process sums and adds 2
-      // sum is 2 + 1..9 == 3..9
+      // process zips rows, sums their numeric columns and adds 2
       assertThat(CalciteAssert.toString(resultSet),
-          equalTo("u=4\n"
-              + "u=5\n"
-              + "u=6\n"
-              + "u=7\n"
-              + "u=8\n"
-              + "u=9\n"));
+          equalTo("U=5\n"
+              + "U=7\n"
+              + "U=9\n"
+              + "U=11\n"));
     }
   }
 

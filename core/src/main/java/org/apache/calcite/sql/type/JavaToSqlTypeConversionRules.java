@@ -18,6 +18,7 @@ package org.apache.calcite.sql.type;
 
 import org.apache.calcite.avatica.util.ArrayImpl;
 import org.apache.calcite.avatica.util.ByteString;
+import org.apache.calcite.sql.util.CursorInput;
 
 import com.google.common.collect.ImmutableMap;
 
@@ -79,6 +80,7 @@ public class JavaToSqlTypeConversionRules {
           .put(Geometry.class, SqlTypeName.GEOMETRY)
 
           .put(ResultSet.class, SqlTypeName.CURSOR)
+          .put(CursorInput.class, SqlTypeName.CURSOR)
           .put(ColumnList.class, SqlTypeName.COLUMN_LIST)
           .put(ArrayImpl.class, SqlTypeName.ARRAY)
           .put(List.class, SqlTypeName.ARRAY)

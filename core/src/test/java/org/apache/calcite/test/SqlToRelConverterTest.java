@@ -49,6 +49,7 @@ import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.fun.SqlLibrary;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.calcite.sql.validate.SqlConformance;
 import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.sql.validate.SqlDelegatingConformance;
@@ -1897,6 +1898,21 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
         + "cursor(select ename from emp),"
         + " cursor(select name from dept), 'NAME'))";
     sql(sql).withDecorrelate(false).ok();
+  }
+
+  /** Tests calling a {@code SqlTableFunction} with cursor and scalar
+   * arguments from SQL. */
+  @Test void testCollectionTableWithCursorAndScalarParam() {
+    final String sql = "select * from table(cursor_and_number("
+        + "cursor(select empno from emp), 10))";
+    fixture()
+        .withFactory(c -> c.withOperatorTable(t ->
+            SqlOperatorTables.chain(t,
+                SqlOperatorTables.of(
+                    new MockSqlOperatorTable.CursorAndNumberTableFunction()))))
+        .withSql(sql)
+        .withDecorrelate(false)
+        .ok();
   }
 
   /** Test case for CURSOR containing UNION ALL. */
