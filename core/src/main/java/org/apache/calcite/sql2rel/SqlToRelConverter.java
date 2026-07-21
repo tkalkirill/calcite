@@ -137,6 +137,7 @@ import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.SqlSelectKeyword;
 import org.apache.calcite.sql.SqlSetOperator;
 import org.apache.calcite.sql.SqlSnapshot;
+import org.apache.calcite.sql.SqlTableFunction;
 import org.apache.calcite.sql.SqlUnnestOperator;
 import org.apache.calcite.sql.SqlUnpivot;
 import org.apache.calcite.sql.SqlUpdate;
@@ -296,6 +297,13 @@ public class SqlToRelConverter {
    * Fields used in name resolution for correlated sub-queries.
    */
   private final Map<CorrelationId, DeferredLookup> mapCorrelToDeferred =
+      new HashMap<>();
+
+  /** Correlations created from input references in scalar-function
+   * arguments. Unlike {@link #mapCorrelToDeferred}, these references point
+   * directly at fields of a blackboard's current relational expression and
+   * therefore do not need name resolution. */
+  private final Map<CorrelationId, DirectCorrelation> mapCorrelToDirect =
       new HashMap<>();
 
   /**
@@ -1366,6 +1374,11 @@ public class SqlToRelConverter {
       return;
     }
 
+    if (isScalarFunctionWithCursor(subQuery.node)) {
+      convertScalarFunctionWithCursor(bb, subQuery);
+      return;
+    }
+
     final SqlBasicCall call;
     final RelNode rel;
     final SqlNode query;
@@ -1576,7 +1589,7 @@ public class SqlToRelConverter {
     case SCALAR_QUERY:
       // Convert the sub-query.  If it's non-correlated, convert it
       // to a constant expression.
-      if (!config.isExpand()) {
+      if (!config.isExpand() && !subQuery.forceExpand) {
         return;
       }
       call = (SqlBasicCall) subQuery.node;
@@ -1619,6 +1632,78 @@ public class SqlToRelConverter {
       throw new AssertionError("unexpected kind of sub-query: "
           + subQuery.node);
     }
+  }
+
+  private static boolean isScalarFunctionWithCursor(SqlNode node) {
+    if (!(node instanceof SqlCall)) {
+      return false;
+    }
+    final SqlCall call = (SqlCall) node;
+    if (!(call.getOperator() instanceof SqlFunction)
+        || call.getOperator() instanceof SqlTableFunction
+        || call.getOperator().isAggregator()) {
+      return false;
+    }
+    for (SqlNode operand : call.getOperandList()) {
+      if (operand != null && operand.getKind() == SqlKind.CURSOR) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Converts a scalar function with cursor arguments to a single-row
+   * table-function scan. The scan inputs carry the cursor queries, while its
+   * invocation keeps the original scalar return type. */
+  private void convertScalarFunctionWithCursor(Blackboard bb,
+      SubQuery subQuery) {
+    final SqlCall call = (SqlCall) subQuery.node;
+    final List<RelNode> inputs = new ArrayList<>();
+    final List<RexNode> operands = new ArrayList<>();
+    final CorrelationId correlId = cluster.createCorrel();
+    final RexCorrelVariable correl =
+        (RexCorrelVariable) rexBuilder.makeCorrel(bb.root().getRowType(), correlId);
+    final ImmutableBitSet.Builder requiredColumns = ImmutableBitSet.builder();
+    final RexShuttle inputRefToCorrel = new RexShuttle() {
+      @Override public RexNode visitInputRef(RexInputRef inputRef) {
+        requiredColumns.set(inputRef.getIndex());
+        return rexBuilder.makeFieldAccess(correl, inputRef.getIndex());
+      }
+    };
+
+    for (SqlNode operand : call.getOperandList()) {
+      if (operand.getKind() == SqlKind.CURSOR) {
+        final SqlCall cursorCall = (SqlCall) operand;
+        final SqlNode query = cursorCall.operand(0);
+        final RelNode input = convertQuery(query, false, false).rel;
+        final RexNode inputRef = new RexInputRef(inputs.size(), input.getRowType());
+        inputs.add(input);
+        operands.add(
+            StandardConvertletTable.castToValidatedType(
+                operand.getParserPosition(), operand, inputRef,
+                validator(), rexBuilder, false));
+      } else {
+        operands.add(bb.convertExpression(operand).accept(inputRefToCorrel));
+      }
+    }
+
+    final ImmutableBitSet argumentColumns = requiredColumns.build();
+    if (!argumentColumns.isEmpty()) {
+      mapCorrelToDirect.put(correlId,
+          new DirectCorrelation(bb, argumentColumns));
+    }
+
+    final RelDataType returnType = validator().getValidatedNodeType(call);
+    final RexNode rexCall =
+        rexBuilder.makeCall(call.getParserPosition(), returnType,
+            call.getOperator(), operands);
+    final RelDataType rowType =
+        typeFactory.builder().add("EXPR$0", returnType).build();
+    final LogicalTableFunctionScan callRel =
+        LogicalTableFunctionScan.create(cluster, inputs, rexCall, null,
+            rowType, null);
+    final RexNode rangeRef = bb.register(callRel, JoinRelType.INNER);
+    subQuery.expr = rexBuilder.makeFieldAccess(rangeRef, 0);
   }
 
   private void substituteSubQueryOfSetSemanticsInputTable(
@@ -2306,6 +2391,21 @@ public class SqlToRelConverter {
     // If node is structurally identical to one of the group-by,
     // then it is not a sub-query; it is a reference.
     if (bb.agg != null && bb.agg.lookupGroupExpr(node) != -1) {
+      return;
+    }
+    if (isScalarFunctionWithCursor(node)) {
+      final SqlCall call = (SqlCall) node;
+      final int firstArgumentSubQuery = bb.subQueryList.size();
+      for (SqlNode operand : call.getOperandList()) {
+        if (operand != null && operand.getKind() != SqlKind.CURSOR) {
+          findSubQueries(bb, operand, RelOptUtil.Logic.TRUE_FALSE_UNKNOWN,
+              registerOnlyScalarSubQueries);
+        }
+      }
+      for (int i = firstArgumentSubQuery; i < bb.subQueryList.size(); i++) {
+        bb.subQueryList.get(i).forceExpand = true;
+      }
+      bb.registerSubQuery(node, logic);
       return;
     }
     final SqlKind kind = node.getKind();
@@ -3466,6 +3566,16 @@ public class SqlToRelConverter {
     final Map<Pair<CorrelationId, Integer>, Integer> fieldMapping = new HashMap<>();
 
     for (CorrelationId correlName : correlatedVariables) {
+      final DirectCorrelation direct = mapCorrelToDirect.get(correlName);
+      if (direct != null) {
+        if (direct.bb == bb) {
+          requiredColumns.addAll(direct.requiredColumns);
+          // Prefer the direct correlation when other correlation variables in
+          // the function's cursor inputs need to be de-duplicated with it.
+          correlNames.add(0, correlName);
+        }
+        continue;
+      }
       DeferredLookup lookup =
           requireNonNull(mapCorrelToDeferred.get(correlName),
               () -> "correlation variable is not found: " + correlName);
@@ -3582,6 +3692,9 @@ public class SqlToRelConverter {
   private boolean isSubQueryNonCorrelated(RelNode subq, Blackboard bb) {
     Set<CorrelationId> correlatedVariables = RelOptUtil.getVariablesUsed(subq);
     for (CorrelationId correlName : correlatedVariables) {
+      if (mapCorrelToDirect.containsKey(correlName)) {
+        return false;
+      }
       DeferredLookup lookup =
           requireNonNull(mapCorrelToDeferred.get(correlName),
               () -> "correlation variable is not found: " + correlName);
@@ -5966,11 +6079,20 @@ public class SqlToRelConverter {
         return rex;
       }
 
+      if (isScalarFunctionWithCursor(expr)) {
+        final SubQuery scalarFunction =
+            requireNonNull(getSubQuery(expr), "scalarFunction");
+        return requireNonNull(scalarFunction.expr, "scalarFunction.expr");
+      }
+
+      final SubQuery registeredSubQuery = getSubQuery(expr);
+
       // Sub-queries and OVER expressions are not like ordinary
       // expressions.
       final SqlKind kind = expr.getKind();
       final SubQuery subQuery;
-      if (!config.isExpand()) {
+      if (!config.isExpand()
+          && (registeredSubQuery == null || !registeredSubQuery.forceExpand)) {
         final SqlCall call;
         final SqlNode query;
         final RelRoot root;
@@ -6404,6 +6526,17 @@ public class SqlToRelConverter {
     }
   }
 
+  /** Correlation to fields of a blackboard's current relational expression. */
+  private static class DirectCorrelation {
+    final Blackboard bb;
+    final ImmutableBitSet requiredColumns;
+
+    DirectCorrelation(Blackboard bb, ImmutableBitSet requiredColumns) {
+      this.bb = bb;
+      this.requiredColumns = requiredColumns;
+    }
+  }
+
   /**
    * Shuttle that rewrites correlation field accesses to use projected field indices
    * when correlation references aggregated relations.
@@ -6692,6 +6825,7 @@ public class SqlToRelConverter {
   private static class SubQuery {
     final SqlNode node;
     final RelOptUtil.Logic logic;
+    boolean forceExpand;
     @Nullable RexNode expr;
 
     private SubQuery(SqlNode node, RelOptUtil.Logic logic) {

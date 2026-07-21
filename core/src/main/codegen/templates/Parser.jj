@@ -4557,7 +4557,7 @@ SqlNode RowExpressionExtension() :
                 args = ImmutableList.of();
             }
         |
-            args = FunctionParameterList(ExprContext.ACCEPT_SUB_QUERY) {
+            args = FunctionParameterList(ExprContext.ACCEPT_CURSOR) {
                 quantifier = (SqlLiteral) args.get(0);
                 args.remove(0);
             }
@@ -8081,7 +8081,7 @@ SqlCall NamedCall() :
             args = ImmutableList.of();
         }
     |
-        args = FunctionParameterList(ExprContext.ACCEPT_SUB_QUERY) {
+        args = FunctionParameterList(ExprContext.ACCEPT_CURSOR) {
             quantifier = (SqlLiteral) args.get(0);
             args.remove(0);
         }

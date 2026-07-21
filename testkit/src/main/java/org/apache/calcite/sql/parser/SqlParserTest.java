@@ -5052,8 +5052,13 @@ public class SqlParserTest {
         .fails("CURSOR expression encountered in illegal context");
     sql("call list(^cursor^(select * from emps))")
         .fails("CURSOR expression encountered in illegal context");
-    sql("select f(^cursor^(select * from emps)) from emps")
-        .fails("CURSOR expression encountered in illegal context");
+  }
+
+  @Test void testCursorAsScalarFunctionArgument() {
+    sql("select f(cursor(select * from emps), 1) from emps")
+        .ok("SELECT `F`((CURSOR ((SELECT *\n"
+            + "FROM `EMPS`))), 1)\n"
+            + "FROM `EMPS`");
   }
 
   @Test void testExplain() {

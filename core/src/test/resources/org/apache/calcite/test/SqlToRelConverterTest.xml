@@ -7912,6 +7912,21 @@ LogicalProject(EMPNO=[$0], ENAME=[$1], JOB=[$2], MGR=[$3], HIREDATE=[$4], SAL=[$
 ]]>
     </Resource>
   </TestCase>
+  <TestCase name="testScalarFunctionWithCursorAndScalarParam">
+    <Resource name="sql">
+      <![CDATA[select cursor_count(cursor(select empno from emp), 10) as n]]>
+    </Resource>
+    <Resource name="plan">
+      <![CDATA[
+LogicalProject(N=[$1])
+  LogicalJoin(condition=[true], joinType=[inner])
+    LogicalValues(tuples=[[{ 0 }]])
+    LogicalTableFunctionScan(invocation=[CURSOR_COUNT(CAST($0):CURSOR NOT NULL, 10)], rowType=[RecordType(INTEGER EXPR$0)])
+      LogicalProject(EMPNO=[$0])
+        LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+    </Resource>
+  </TestCase>
   <TestCase name="testSelectDistinct">
     <Resource name="sql">
       <![CDATA[select distinct sal + 5 from emp]]>

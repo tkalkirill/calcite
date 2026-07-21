@@ -29,6 +29,7 @@ import org.apache.calcite.linq4j.tree.Expressions;
 import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.volcano.VolcanoPlanner;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
 import org.apache.calcite.rex.RexBuilder;
@@ -44,6 +45,7 @@ import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlMatchFunction;
+import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlWindowTableFunction;
 import org.apache.calcite.sql.fun.SqlBasicAggFunction;
@@ -51,8 +53,13 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.OperandTypes;
 import org.apache.calcite.sql.type.ReturnTypes;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.test.MockSqlOperatorTable;
+import org.apache.calcite.tools.FrameworkConfig;
+import org.apache.calcite.tools.Frameworks;
+import org.apache.calcite.tools.Planner;
+import org.apache.calcite.tools.Programs;
 
 import com.google.common.collect.ImmutableList;
 
@@ -230,6 +237,95 @@ class RexImplementorTableTest {
     final Enumerable<Object[]> rows = bindable.bind(dataContext);
     assertThat(rows.select(Arrays::toString).toList(),
         contains("[0, 10]", "[1, 11]", "[2, 12]"));
+  }
+
+  /** Parses and executes a scalar function with a cursor using an implementor
+   * supplied by an extension table. */
+  @Test void executesSqlScalarFunctionWithCursorFromExtensionTable()
+      throws Exception {
+    assertThat(executeScalarCursorFunction("select cursor_count("
+            + "cursor(select * from (values (0), (1), (2)) as t(n)), d.n) as n "
+            + "from (values (10), (20)) as d(n)"),
+        contains(13, 23));
+  }
+
+  /** Executes a scalar function whose non-cursor argument is itself a scalar
+   * sub-query correlated to the current outer row. */
+  @Test void executesSqlScalarFunctionWithCursorAndScalarSubQuery()
+      throws Exception {
+    assertThat(executeScalarCursorFunction("select cursor_count("
+            + "cursor(select t.n "
+            + "from (values (10), (10), (20), (30)) as t(n) "
+            + "where t.n = d.n), "
+            + "(select d.n)) as n "
+            + "from (values (10), (20), (40)) as d(n)"),
+        contains(12, 21, 40));
+  }
+
+  /** Executes a scalar function whose cursor query references the current
+   * row of the outer query. */
+  @Test void executesSqlScalarFunctionWithCorrelatedCursor()
+      throws Exception {
+    assertThat(executeScalarCursorFunction("select cursor_count("
+            + "cursor(select t.n "
+            + "from (values (10), (10), (20), (30)) as t(n) "
+            + "where t.n = d.n), 0) as n "
+            + "from (values (10), (20), (40)) as d(n)"),
+        contains(2, 1, 0));
+  }
+
+  private static List<Integer> executeScalarCursorFunction(String sql)
+      throws Exception {
+    final MockSqlOperatorTable.CursorAndNumberScalarFunction operator =
+        new MockSqlOperatorTable.CursorAndNumberScalarFunction();
+    final FrameworkConfig config = Frameworks.newConfigBuilder()
+        .defaultSchema(Frameworks.createRootSchema(true))
+        .operatorTable(SqlOperatorTables.chain(
+            SqlStdOperatorTable.instance(), SqlOperatorTables.of(operator)))
+        .programs(Programs.standard())
+        .build();
+    final RelNode enumerable;
+    try (Planner planner = Frameworks.getPlanner(config)) {
+      final SqlNode parsed = planner.parse(sql);
+      final SqlNode validated = planner.validate(parsed);
+      final RelNode logical = planner.rel(validated).rel;
+      enumerable =
+          planner.transform(0,
+              logical.getTraitSet().replace(EnumerableConvention.INSTANCE),
+              logical);
+    }
+    final RexImplementorTable implementorTable =
+        RexImplementorTables.chain(
+            new SingleScalarTable(operator, operator.implementor()),
+            RexImpTable.instance());
+    final Map<String, Object> parameters = new HashMap<>();
+    parameters.put("_rexImplementorTable", implementorTable);
+
+    final Bindable<Integer> bindable =
+        EnumerableInterpretable.toBindable(parameters, null,
+            (EnumerableRel) enumerable,
+            EnumerableRel.Prefer.ARRAY);
+    final JavaTypeFactory typeFactory =
+        (JavaTypeFactory) enumerable.getCluster().getTypeFactory();
+    final DataContext dataContext = new DataContext() {
+      @Override public @Nullable SchemaPlus getRootSchema() {
+        return null;
+      }
+
+      @Override public JavaTypeFactory getTypeFactory() {
+        return typeFactory;
+      }
+
+      @Override public QueryProvider getQueryProvider() {
+        return Linq4j.DEFAULT_PROVIDER;
+      }
+
+      @Override public @Nullable Object get(String name) {
+        return parameters.get(name);
+      }
+    };
+    final Enumerable<Integer> rows = bindable.bind(dataContext);
+    return rows.toList();
   }
 
   /** A table earlier in the chain overrides a built-in implementor. */

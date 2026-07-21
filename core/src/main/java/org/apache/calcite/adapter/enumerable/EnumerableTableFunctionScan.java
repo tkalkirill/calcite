@@ -41,6 +41,9 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.util.CursorInput;
 import org.apache.calcite.sql.util.CursorInputs;
 import org.apache.calcite.sql.validate.SqlUserDefinedTableFunction;
+import org.apache.calcite.util.BuiltInMethod;
+
+import com.google.common.collect.ImmutableList;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -78,8 +81,8 @@ public class EnumerableTableFunctionScan extends TableFunctionScan
   @Override public Result implement(EnumerableRelImplementor implementor, Prefer pref) {
     if (isImplementorDefined((RexCall) getCall())) {
       return tvfImplementorBasedImplement(implementor, pref);
-    } else if (isTableFunctionWithCursorInputs(implementor)) {
-      return cursorTableFunctionImplement(implementor);
+    } else if (isFunctionWithCursorInputs(implementor)) {
+      return cursorFunctionImplement(implementor);
     } else {
       return defaultTableFunctionImplement(implementor);
     }
@@ -93,7 +96,7 @@ public class EnumerableTableFunctionScan extends TableFunctionScan
     return false;
   }
 
-  private boolean isTableFunctionWithCursorInputs(
+  private boolean isFunctionWithCursorInputs(
       EnumerableRelImplementor implementor) {
     if (getInputs().isEmpty()
         || !(getCall() instanceof RexCall)) {
@@ -111,7 +114,7 @@ public class EnumerableTableFunctionScan extends TableFunctionScan
     return false;
   }
 
-  private Result cursorTableFunctionImplement(
+  private Result cursorFunctionImplement(
       EnumerableRelImplementor implementor) {
     final JavaTypeFactory typeFactory = implementor.getTypeFactory();
     final BlockBuilder builder = new BlockBuilder();
@@ -159,22 +162,27 @@ public class EnumerableTableFunctionScan extends TableFunctionScan
     final RexCallImplementor rexCallImplementor =
         rexCallImplementor(implementor, call);
     if (rexCallImplementor == null) {
-      throw new IllegalStateException("Table function " + call.getOperator()
+      throw new IllegalStateException("Function " + call.getOperator()
           + " has no implementation");
     }
     final RexToLixTranslator.Result result =
         rexCallImplementor.implement(translator, call, operandResults);
-    final Expression enumerable =
+    final Expression value =
         RexImpTable.NullAs.NULL.handle(result.valueVariable);
+    final Expression enumerable;
+    if (call.getOperator() instanceof SqlTableFunction) {
+      enumerable = value;
+    } else {
+      enumerable =
+          Expressions.call(BuiltInMethod.SINGLETON_ENUMERABLE.method,
+              physType.record(ImmutableList.of(value)));
+    }
     builder.add(Expressions.return_(null, enumerable));
     return implementor.result(physType, builder.toBlock());
   }
 
   private static @Nullable RexCallImplementor rexCallImplementor(
       EnumerableRelImplementor implementor, RexCall call) {
-    if (!(call.getOperator() instanceof SqlTableFunction)) {
-      return null;
-    }
     return implementor.getRexImplementorTable().get(call.getOperator());
   }
 

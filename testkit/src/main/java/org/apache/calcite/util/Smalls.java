@@ -138,6 +138,9 @@ public class Smalls {
   public static final Method PROCESS_CURSOR_WITH_NUMBER_METHOD =
       Types.lookupMethod(Smalls.class, "processCursorWithNumber",
           CursorInput.class, Integer.class);
+  public static final Method COUNT_CURSOR_WITH_NUMBER_METHOD =
+      Types.lookupMethod(Smalls.class, "countCursorWithNumber",
+          CursorInput.class, Integer.class);
   public static final Method PROCESS_CURSORS_METHOD =
       Types.lookupMethod(Smalls.class, "processCursors",
           int.class, CursorInput.class, CursorInput.class);
@@ -486,6 +489,11 @@ public class Smalls {
             .asQueryable();
       }
     };
+  }
+
+  /** Scalar function that adds a number to the number of cursor rows. */
+  public static int countCursorWithNumber(CursorInput input, Integer number) {
+    return input.rows().count() + number;
   }
 
   /**

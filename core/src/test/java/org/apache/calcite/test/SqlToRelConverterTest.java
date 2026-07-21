@@ -1915,6 +1915,19 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
         .ok();
   }
 
+  /** Tests calling a scalar function with cursor and scalar arguments. */
+  @Test void testScalarFunctionWithCursorAndScalarParam() {
+    fixture()
+        .withFactory(c -> c.withOperatorTable(t ->
+            SqlOperatorTables.chain(t,
+                SqlOperatorTables.of(
+                    new MockSqlOperatorTable.CursorAndNumberScalarFunction()))))
+        .withSql("select cursor_count("
+            + "cursor(select empno from emp), 10) as n")
+        .withDecorrelate(false)
+        .ok();
+  }
+
   /** Test case for CURSOR containing UNION ALL. */
   @Test void testCollectionTableWithCursorParamUnion() {
     final String sql = "select * from table(dedup("

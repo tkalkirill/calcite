@@ -16,6 +16,8 @@
  */
 package org.apache.calcite.test;
 
+import org.apache.calcite.adapter.enumerable.NullPolicy;
+import org.apache.calcite.adapter.enumerable.ReflectiveCallNotNullImplementor;
 import org.apache.calcite.adapter.enumerable.RexImpTable;
 import org.apache.calcite.adapter.enumerable.RexImpTable.RexCallImplementor;
 import org.apache.calcite.rel.type.RelDataType;
@@ -168,6 +170,27 @@ public class MockSqlOperatorTable extends ChainedSqlOperatorTable {
 
     public RexCallImplementor implementor() {
       return RexImpTable.wrapAsRexCallImplementor(FUNCTION.getImplementor());
+    }
+  }
+
+  /** Scalar function that takes a cursor and a number. */
+  public static class CursorAndNumberScalarFunction extends SqlFunction {
+    private static final RexCallImplementor IMPLEMENTOR =
+        RexImpTable.wrapAsRexCallImplementor(
+            RexImpTable.createImplementor(
+                new ReflectiveCallNotNullImplementor(
+                    Smalls.COUNT_CURSOR_WITH_NUMBER_METHOD),
+                NullPolicy.NONE, false));
+
+    public CursorAndNumberScalarFunction() {
+      super("CURSOR_COUNT", SqlKind.OTHER_FUNCTION,
+          ReturnTypes.INTEGER_NULLABLE, null,
+          OperandTypes.family(SqlTypeFamily.CURSOR, SqlTypeFamily.INTEGER),
+          SqlFunctionCategory.USER_DEFINED_FUNCTION);
+    }
+
+    public RexCallImplementor implementor() {
+      return IMPLEMENTOR;
     }
   }
 
