@@ -111,6 +111,12 @@ public class Smalls {
   public static final Method MULTIPLICATION_TABLE_METHOD =
       Types.lookupMethod(Smalls.class, "multiplicationTable", int.class,
         int.class, Integer.class);
+  public static final Method SCALAR_QUERY_ARGUMENTS_TABLE_METHOD =
+      Types.lookupMethod(Smalls.class, "scalarQueryArgumentsTable",
+          Object.class, Integer.class, Integer.class);
+  public static final Method SCALAR_QUERY_ARGUMENTS_TABLE_WITHOUT_COLUMN_METHOD =
+      Types.lookupMethod(Smalls.class,
+          "scalarQueryArgumentsTableWithoutColumn", Object.class, int.class);
   public static final Method FIBONACCI_TABLE_METHOD =
       Types.lookupMethod(Smalls.class, "fibonacciTable");
   public static final Method FIBONACCI_LIMIT_100_TABLE_METHOD =
@@ -281,6 +287,49 @@ public class Smalls {
         return Linq4j.asEnumerable(table).asQueryable();
       }
     };
+  }
+
+  /** A one-row table containing the arguments passed to the function.
+   *
+   * <p>For a scalar argument whose value is a row, {@code scalar_value} is
+   * {@code 1}; for a numeric scalar argument, it is the numeric value. */
+  public static QueryableTable scalarQueryArgumentsTable(
+      final @Nullable Object scalarValue,
+      final @Nullable Integer literalValue,
+      final @Nullable Integer columnValue) {
+    final @Nullable Integer normalizedScalarValue;
+    if (scalarValue == null) {
+      normalizedScalarValue = null;
+    } else if (scalarValue instanceof Number) {
+      normalizedScalarValue = ((Number) scalarValue).intValue();
+    } else {
+      normalizedScalarValue = 1;
+    }
+    return new AbstractQueryableTable(Object[].class) {
+      @Override public RelDataType getRowType(RelDataTypeFactory typeFactory) {
+        return typeFactory.builder()
+            .add("scalar_value", typeFactory.createJavaType(Integer.class))
+            .add("literal_value", typeFactory.createJavaType(Integer.class))
+            .add("column_value", typeFactory.createJavaType(Integer.class))
+            .build();
+      }
+
+      @Override public Queryable<Object[]> asQueryable(
+          QueryProvider queryProvider, SchemaPlus schema, String tableName) {
+        return Linq4j.asEnumerable(
+            Collections.singletonList(
+                new Object[] {
+                    normalizedScalarValue, literalValue, columnValue
+                }))
+            .asQueryable();
+      }
+    };
+  }
+
+  /** A two-argument version of {@link #scalarQueryArgumentsTable}. */
+  public static QueryableTable scalarQueryArgumentsTableWithoutColumn(
+      final @Nullable Object scalarValue, final int literalValue) {
+    return scalarQueryArgumentsTable(scalarValue, literalValue, null);
   }
 
   /** A function that generates the Fibonacci sequence.

@@ -48,6 +48,7 @@ import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RelConversionException;
 import org.apache.calcite.tools.ValidationException;
 import org.apache.calcite.util.Smalls;
+import org.apache.calcite.util.TestUtil;
 import org.apache.calcite.util.Util;
 
 import com.google.common.collect.ImmutableList;
@@ -65,10 +66,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import static java.util.Objects.requireNonNull;
 
@@ -738,6 +741,138 @@ class InterpreterTest {
         + "from table(\"s\".\"Maze\"(5, 3, 1))";
     String[] rows = {"[abcde]", "[xyz]", "[generate(w=5, h=3, s=1)]"};
     sql(sql).returnsRows(rows);
+  }
+
+  @Test void testInterpretTableFunctionWithScalarQueryAndLiteralArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select f.\"scalar_value\", f.\"literal_value\"\n"
+        + "from table(\"s\".\"scalar_query_arguments_without_column\"(\n"
+        + "  (select 10), 20)) as f";
+    sql(sql).returnsRows("[10, 20]");
+  }
+
+  @Test void testInterpretTableFunctionWithEmptyScalarQuery() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select f.\"scalar_value\", f.\"literal_value\"\n"
+        + "from table(\"s\".\"scalar_query_arguments_without_column\"(\n"
+        + "  (select v from (values (10)) as q(v) where v < 0), 20)) as f";
+    sql(sql).returnsRows("[null, 20]");
+  }
+
+  @Test void testInterpretTableFunctionWithMultiRowScalarQuery() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select *\n"
+        + "from table(\"s\".\"scalar_query_arguments_without_column\"(\n"
+        + "  (select v from (values (10), (20)) as q(v)), 20))";
+    final RuntimeException exception =
+        assertThrows(RuntimeException.class, () -> sql(sql).returnsRows());
+    assertThat(TestUtil.printStackTrace(exception),
+        containsString("more than one value in agg SINGLE_VALUE"));
+  }
+
+  @Test void
+      testInterpretTableFunctionWithScalarQueryLiteralAndColumnArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select d.n, f.\"scalar_value\", f.\"literal_value\",\n"
+        + "  f.\"column_value\"\n"
+        + "from (values (100), (200)) as d(n)\n"
+        + "cross join lateral table(\"s\".\"scalar_query_arguments\"(\n"
+        + "  (select 10), 20, d.n)) as f";
+    sql(sql).returnsRows(
+        "[100, 10, 20, 100]",
+        "[200, 10, 20, 200]");
+  }
+
+  @Test void testInterpretTableFunctionWithScalarQueriesAndColumnArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select d.n, f.\"scalar_value\", f.\"literal_value\",\n"
+        + "  f.\"column_value\"\n"
+        + "from (values (100), (200)) as d(n)\n"
+        + "cross join lateral table(\"s\".\"scalar_query_arguments\"(\n"
+        + "  (select 10), (select 20), d.n)) as f";
+    sql(sql).returnsRows(
+        "[100, 10, 20, 100]",
+        "[200, 10, 20, 200]");
+  }
+
+  @Test void
+      testInterpretTableFunctionWithCorrelatedScalarQueryAndLiteralArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select d.n, f.\"scalar_value\", f.\"literal_value\"\n"
+        + "from (values (100), (200)) as d(n)\n"
+        + "cross join lateral table(\"s\".\"scalar_query_arguments_without_column\"(\n"
+        + "  (select d.n + 1), 20)) as f";
+    sql(sql).returnsRows(
+        "[100, 101, 20]",
+        "[200, 201, 20]");
+  }
+
+  @Test void
+      testInterpretTableFunctionWithCorrelatedScalarQueryLiteralAndColumnArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select d.n, f.\"scalar_value\", f.\"literal_value\",\n"
+        + "  f.\"column_value\"\n"
+        + "from (values (100), (200)) as d(n)\n"
+        + "cross join lateral table(\"s\".\"scalar_query_arguments\"(\n"
+        + "  (select d.n + 1), 20, d.n)) as f";
+    sql(sql).returnsRows(
+        "[100, 101, 20, 100]",
+        "[200, 201, 20, 200]");
+  }
+
+  @Test void
+      testInterpretTableFunctionWithScalarQueryExpressionAndLiteralArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select f.\"scalar_value\", f.\"literal_value\"\n"
+        + "from table(\"s\".\"scalar_query_arguments_without_column\"(\n"
+        + "  (select 4) + (select 6), 20)) as f";
+    sql(sql).returnsRows("[10, 20]");
+  }
+
+  @Test void
+      testInterpretTableFunctionWithScalarQueryExpressionLiteralAndColumnArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select d.n, f.\"scalar_value\", f.\"literal_value\",\n"
+        + "  f.\"column_value\"\n"
+        + "from (values (100), (200)) as d(n)\n"
+        + "cross join lateral table(\"s\".\"scalar_query_arguments\"(\n"
+        + "  (select 4) + (select 6), 20, d.n)) as f";
+    sql(sql).returnsRows(
+        "[100, 10, 20, 100]",
+        "[200, 10, 20, 200]");
+  }
+
+  @Test void testInterpretTableFunctionWithRowScalarQueryAndLiteralArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select f.\"scalar_value\", f.\"literal_value\"\n"
+        + "from table(\"s\".\"scalar_query_arguments_without_column\"(\n"
+        + "  (select row(1, 2)), 20)) as f";
+    sql(sql).returnsRows("[1, 20]");
+  }
+
+  @Test void
+      testInterpretTableFunctionWithRowScalarQueryLiteralAndColumnArguments() {
+    addScalarQueryArgumentTableFunctions();
+    final String sql = "select d.n, f.\"scalar_value\", f.\"literal_value\",\n"
+        + "  f.\"column_value\"\n"
+        + "from (values (100), (200)) as d(n)\n"
+        + "cross join lateral table(\"s\".\"scalar_query_arguments\"(\n"
+        + "  (select row(1, 2)), 20, d.n)) as f";
+    sql(sql).returnsRows(
+        "[100, 1, 20, 100]",
+        "[200, 1, 20, 200]");
+  }
+
+  private void addScalarQueryArgumentTableFunctions() {
+    final SchemaPlus schema = rootSchema().add("s", new AbstractSchema());
+    schema.add("scalar_query_arguments",
+        requireNonNull(
+            TableFunctionImpl.create(
+                Smalls.SCALAR_QUERY_ARGUMENTS_TABLE_METHOD)));
+    schema.add("scalar_query_arguments_without_column",
+        requireNonNull(
+            TableFunctionImpl.create(
+                Smalls.SCALAR_QUERY_ARGUMENTS_TABLE_WITHOUT_COLUMN_METHOD)));
   }
 
   /** Tests a table function that takes zero arguments.
