@@ -636,6 +636,42 @@ public class RelDecorrelator implements ReflectiveVisitor {
     return register(rel, newSort, frame.oldToNewOutputs, frame.corDefOutputs);
   }
 
+  /** Returns whether an aggregate call gives the same result for no rows
+   * and for one row of NULL values. */
+  private static boolean isCallSameForNoRowsAndNullRow(AggregateCall aggCall) {
+    final SqlAggFunction function = aggCall.getAggregation();
+    switch (function.getKind()) {
+    case SUM:
+    case SUM0:
+    case MIN:
+    case MAX:
+    case AVG:
+    case ANY_VALUE:
+    case SINGLE_VALUE:
+      // Built-in functions that give NULL (SUM0 gives 0) for both
+      return true;
+    case OTHER_FUNCTION:
+      // A user-defined function that skips NULL inputs skips the row of
+      // NULL values, so it sees no rows in both cases
+      return !aggCall.getArgList().isEmpty() && function.skipsNullInputs();
+    default:
+      // Other built-in functions can give different results. COUNT(*)
+      // gives 0 for no rows and 1 for a row. ARRAY_AGG gives an empty array
+      // for no rows, and NULL or [NULL] for a row, depending on whether it
+      // keeps NULL values.
+      return false;
+    }
+  }
+
+  /** Returns whether an Aggregate gives the same result for no input rows
+   * and for one input row of NULL values. An Aggregate with GROUP BY keys
+   * does not: it gives no group for no rows, but one group for a row. */
+  static boolean isSameForNoRowsAndNullRow(Aggregate aggregate) {
+    return aggregate.getGroupSet().isEmpty()
+        && aggregate.getAggCallList().stream()
+            .allMatch(RelDecorrelator::isCallSameForNoRowsAndNullRow);
+  }
+
   public @Nullable Frame decorrelateRel(LogicalAggregate rel, boolean isCorVarDefined,
       boolean parentPropagatesNullValues) {
     return decorrelateRel((Aggregate) rel, isCorVarDefined, parentPropagatesNullValues);
@@ -656,7 +692,17 @@ public class RelDecorrelator implements ReflectiveVisitor {
     assert !cm.mapRefRelToCorRef.containsKey(rel);
 
     final RelNode oldInput = rel.getInput();
-    final Frame frame = getInvoke(oldInput, isCorVarDefined, rel, parentPropagatesNullValues);
+    // This Aggregate is the parent of its input. The input can give no row
+    // in place of a row of NULL values only if this Aggregate gives the
+    // same result for both. Example, for an outer table t:
+    //   SELECT COUNT(*) FROM (SELECT COUNT(*) FROM s
+    //     WHERE s.k = t.k GROUP BY ROLLUP(s.a))
+    // For a row of t that matches no row of s, the () group of ROLLUP
+    // gives one row, so the result is 1, not 0.
+    final boolean aggregatePropagatesNullValues = parentPropagatesNullValues
+        && isSameForNoRowsAndNullRow(rel);
+    final Frame frame =
+        getInvoke(oldInput, isCorVarDefined, rel, aggregatePropagatesNullValues);
     if (frame == null) {
       // If input has not been rewritten, do not rewrite this rel.
       return null;
@@ -680,10 +726,15 @@ public class RelDecorrelator implements ReflectiveVisitor {
     int newPos = 0;
 
     final List<Integer> groupKeyIndices = rel.getGroupSet().asList();
+    // If decorrelation adds no correlation key, keep the constant keys:
+    // GROUP BY TRUE gives no row for an empty input, but GROUP BY ()
+    // gives one row.
+    final boolean keepConstantKeys = frame.corDefOutputs.isEmpty();
     final NavigableMap<Integer, RexLiteral> omittedConstants = new TreeMap<>();
     for (int i = 0; i < oldGroupKeyCount; i++) {
       final int idx = groupKeyIndices.get(i);
-      final RexLiteral constant = projectedLiteral(newInput, idx);
+      final RexLiteral constant =
+          keepConstantKeys ? null : projectedLiteral(newInput, idx);
       if (constant != null) {
         // Exclude constants. Aggregate({true}) occurs because Aggregate({})
         // would generate 1 row even when applied to an empty table.
@@ -1757,21 +1808,29 @@ public class RelDecorrelator implements ReflectiveVisitor {
    * ensuring that we only map the correlation variable to a local field or
    * expression from the current relational expression (e.g., a {@link RexInputRef}),
    * rather than to another correlation variable.
+   *
+   * <p>{@code IS NOT DISTINCT FROM} establishes the same equivalence as
+   * {@code =} (it compares values null-safely), so it is also recognized.
    */
   private static void findCorrelationEquivalent(CorRef correlation, RexNode e)
       throws Util.FoundOne {
     switch (e.getKind()) {
     case EQUALS:
+    case IS_NOT_DISTINCT_FROM:
       final RexCall call = (RexCall) e;
       final List<RexNode> operands = call.getOperands();
-      if (!RexUtil.containsFieldAccess(operands.get(1))
-          && references(operands.get(0), correlation)) {
-        throw new Util.FoundOne(operands.get(1));
-      }
-      if (!RexUtil.containsFieldAccess(operands.get(0))
-          && references(operands.get(1), correlation)) {
-        throw new Util.FoundOne(operands.get(0));
-      }
+      // For IS NOT DISTINCT FROM, binding the correlation to a local operand
+      // is only sound if that operand is NOT NULL. Decorrelation leaves the
+      // original filter in place on the inner side of the join, with the
+      // correlation substituted by its binding, so the filter condition
+      // becomes the residual condition {@code IS NOT DISTINCT FROM(x, x)},
+      // which is always true (hence harmless). The null-safe comparison of
+      // the original condition is instead enforced by the join condition.
+      // If x were nullable, inner rows with x = NULL, which the original
+      // condition accepts when the correlated column is null, would be
+      // rejected by the null-rejecting join condition, changing the result.
+      findEqualityEquivalent(correlation, operands.get(0), operands.get(1),
+          e.getKind() == SqlKind.IS_NOT_DISTINCT_FROM);
       break;
     case AND:
       for (RexNode operand : ((RexCall) e).getOperands()) {
@@ -1780,6 +1839,26 @@ public class RelDecorrelator implements ReflectiveVisitor {
       break;
     default:
       break;
+    }
+  }
+
+  /** If one of {@code operand0} and {@code operand1} references the given
+   * correlation, and the other does not contain any {@link RexFieldAccess},
+   * throws the other operand as a {@link org.apache.calcite.util.Util.FoundOne}.
+   *
+   * <p>If {@code requireNotNullOperand} is true, the non-correlation operand
+   * must additionally be NOT NULL to be accepted. */
+  private static void findEqualityEquivalent(CorRef correlation, RexNode operand0,
+      RexNode operand1, boolean requireNotNullOperand) throws Util.FoundOne {
+    if (!RexUtil.containsFieldAccess(operand1)
+        && references(operand0, correlation)
+        && !(requireNotNullOperand && operand1.getType().isNullable())) {
+      throw new Util.FoundOne(operand1);
+    }
+    if (!RexUtil.containsFieldAccess(operand0)
+        && references(operand1, correlation)
+        && !(requireNotNullOperand && operand0.getType().isNullable())) {
+      throw new Util.FoundOne(operand0);
     }
   }
 

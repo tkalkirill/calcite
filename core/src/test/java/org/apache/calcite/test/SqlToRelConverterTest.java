@@ -383,6 +383,22 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
         .ok();
   }
 
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7933">[CALCITE-7933]
+   * Correlated subqueries with lambdas that capture columns are incorrectly
+   * compiled</a>. */
+  @Test void testLambdaInSubQueryReadsEnclosingColumn() {
+    final String sql = "select t.x,\n"
+        + "  (select count(*) from (values (5, array[1, 5])) as s(y, b)\n"
+        + "   where \"EXISTS\"(s.b, e -> e = t.x)) as c\n"
+        + "from (values (1), (7)) as t(x)";
+    fixture()
+        .withFactory(c ->
+            c.withOperatorTable(t -> SqlValidatorTest.operatorTableFor(SqlLibrary.SPARK)))
+        .withSql(sql)
+        .withDecorrelate(false)
+        .ok();
+  }
+
   @Test void testDotLiteralAfterRow() {
     final String sql = "select row(1,2).\"EXPR$1\" from emp";
     sql(sql).ok();
@@ -2519,6 +2535,44 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
   @Test void testAliasUnnestArrayLiteralPlanWithoutColumnList() {
     final String sql = "select t\n"
         + "from UNNEST(ARRAY[1, 2, 3]) as t";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  /** Flattening does not change the element type of a collection, so UNNEST
+   * can produce ROW columns in a flattened plan. Here each element is
+   * ROW(EMPNO, ENAME, DETAIL ROW(SKILLS)); UNNEST expands the outer ROW, and
+   * the flattened plan must also expand DETAIL. */
+  @Test void testUnnestNestedRowFlattened() {
+    final String sql = "select d.deptno, e.*\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) as e";
+    sql(sql).ok();
+  }
+
+  /** As {@link #testUnnestNestedRowFlattened()}, but with PRESTO
+   * conformance UNNEST keeps each element as a single ROW column. */
+  @Test void testAliasUnnestArrayFlattened() {
+    final String sql = "select d.deptno, e\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) as t(e)";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  /** As {@link #testAliasUnnestArrayFlattened()}, with ordinality: the
+   * ordinality column follows all the flattened fields of the ROW. */
+  @Test void testAliasUnnestArrayWithOrdinalityFlattened() {
+    final String sql = "select d.deptno, e, o\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) with ordinality as t(e, o)";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  /** As {@link #testAliasUnnestArrayWithOrdinalityFlattened()}, selecting
+   * fields of the ROW, one of them inside the nested ROW DETAIL. */
+  @Test void testAliasUnnestArrayFieldsFlattened() {
+    final String sql = "select e.empno, e.detail.skills, o\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) with ordinality as t(e, o)";
     sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
   }
 

@@ -2373,6 +2373,227 @@ MultiJoin(joinFilter=[true], isFullOuterJoin=[false], joinTypes=[[RIGHT, INNER]]
 ]]>
     </Resource>
   </TestCase>
+  <TestCase name="testCorrelateUncollectMergeOrdinality">
+    <Resource name="sql">
+      <![CDATA[select t2.admin, t2.rn
+from DEPT_NESTED_EXPANDED as t1,
+unnest(t1.admins) WITH ORDINALITY as t2(admin, rn)]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(ADMIN=[$5], RN=[$6])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+    Uncollect(withOrdinality=[true])
+      LogicalProject(ADMINS=[$cor0.ADMINS])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(ADMIN=[$0], RN=[$1])
+  Uncollect(collectionFields=[{3}], withOrdinality=[true])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergeOutOfOrderCollections">
+    <Resource name="sql">
+      <![CDATA[select t1.name
+from DEPT_NESTED_EXPANDED as t1,
+unnest(t1.admins, t1.employees) as t2]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(NAME=[$1])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{2, 3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+    Uncollect
+      LogicalProject(ADMINS=[$cor0.ADMINS], EMPLOYEES=[$cor0.EMPLOYEES])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(NAME=[$1])
+  LogicalProject(DEPTNO=[$0], NAME=[$1], EMPLOYEES=[$2], ADMINS=[$3], OFFICES=[$4], ADMINS0=[$8], EMPNO=[$5], ENAME=[$6], DETAIL=[$7])
+    Uncollect(passthrough=[{0, 1, 2, 3, 4}], collectionFields=[{2, 3}])
+      LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergeOutOfOrderScalarArrays">
+    <Resource name="sql">
+      <![CDATA[with t1 as (select array['a', 'b'] as sa, array[1, 2] as ia)
+select u.x, u.y
+from t1, unnest(t1.ia, t1.sa) as u(x, y)]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(X=[$2], Y=[$3])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{0, 1}])
+    LogicalProject(SA=[ARRAY('a', 'b')], IA=[ARRAY(1, 2)])
+      LogicalValues(tuples=[[{ 0 }]])
+    Uncollect
+      LogicalProject(IA=[$cor0.IA], SA=[$cor0.SA])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(X=[$2], Y=[$3])
+  LogicalProject(SA=[$0], IA=[$1], IA0=[$3], SA0=[$2])
+    Uncollect(passthrough=[{0, 1}], collectionFields=[{0, 1}])
+      LogicalProject(SA=[ARRAY('a', 'b')], IA=[ARRAY(1, 2)])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergePassthroughCollectionRef">
+    <Resource name="sql">
+      <![CDATA[select t1.admins, t2.admin
+from DEPT_NESTED_EXPANDED as t1,
+unnest(t1.admins) as t2(admin)]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(ADMINS=[$3], ADMIN=[$5])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+    Uncollect
+      LogicalProject(ADMINS=[$cor0.ADMINS])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(ADMINS=[$0], ADMIN=[$1])
+  Uncollect(passthrough=[{3}], collectionFields=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergeRepeatedCollection">
+    <Resource name="sql">
+      <![CDATA[select t2.a, t2.b
+from DEPT_NESTED_EXPANDED as t1,
+unnest(t1.admins, t1.admins) as t2(a, b)]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(A=[$5], B=[$6])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+    Uncollect
+      LogicalProject(ADMINS=[$cor0.ADMINS], ADMINS0=[$cor0.ADMINS])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(A=[$5], B=[$6])
+  LogicalProject(DEPTNO=[$0], NAME=[$1], EMPLOYEES=[$2], ADMINS=[$3], OFFICES=[$4], ADMINS0=[CAST($5):VARCHAR(5)], ADMINS00=[CAST($5):VARCHAR(5)])
+    Uncollect(passthrough=[{0, 1, 2, 3, 4}], collectionFields=[{3}])
+      LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergeScalarArray">
+    <Resource name="sql">
+      <![CDATA[select t1.name, t2.admin
+from DEPT_NESTED_EXPANDED as t1,
+unnest(t1.admins) as t2(admin)]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(NAME=[$1], ADMIN=[$5])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+    Uncollect
+      LogicalProject(ADMINS=[$cor0.ADMINS])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(NAME=[$0], ADMIN=[$1])
+  Uncollect(passthrough=[{1}], collectionFields=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergeStructArray">
+    <Resource name="sql">
+      <![CDATA[select t2.ename
+from DEPT_NESTED as t1,
+unnest(t1.employees) as t2]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(ENAME=[$5])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED]])
+    Uncollect
+      LogicalProject(EMPLOYEES=[$cor0.EMPLOYEES])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(ENAME=[$1])
+  Uncollect(collectionFields=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergeUnexpandedStruct">
+    <Resource name="sql">
+      <![CDATA[select d.deptno, e.empno
+from dept_nested_expanded as d,
+unnest(d.employees) as e]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(DEPTNO=[$0], EMPNO=[$5.EMPNO])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{2}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+    Uncollect(expandStructFields=[false])
+      LogicalProject(EMPLOYEES=[$cor0.EMPLOYEES])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(DEPTNO=[$0], EMPNO=[$5.EMPNO])
+  LogicalProject(DEPTNO=[$0], NAME=[$1], EMPLOYEES=[$2], ADMINS=[$3], OFFICES=[$4], EXPR$0=[$5])
+    Uncollect(passthrough=[{0, 1, 2, 3, 4}], collectionFields=[{2}], expandStructFields=[false])
+      LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelateUncollectMergeWithoutProject">
+    <Resource name="sql">
+      <![CDATA[select *
+from DEPT_NESTED_EXPANDED as t1,
+unnest(t1.admins) as t2(admin)]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{3}])
+  LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+  Uncollect
+    LogicalProject(ADMINS=[$cor0.ADMINS])
+      LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(DEPTNO=[$0], NAME=[$1], EMPLOYEES=[$2], ADMINS=[$3], OFFICES=[$4], ADMINS0=[$5])
+  Uncollect(passthrough=[{0, 1, 2, 3, 4}], collectionFields=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+]]>
+    </Resource>
+  </TestCase>
   <TestCase name="testCorrelateWithoutCorrelationToEmpty">
     <Resource name="sql">
       <![CDATA[select * from emp e where exists (select 1 from dept where empno=null)]]>
@@ -2425,6 +2646,33 @@ LogicalProject(DEPTNO=[$0], DNAME=[$1], LOC=[$2])
       LogicalProject(i=[true])
         LogicalFilter(condition=[AND(=($cor0.DEPTNO, $7), >($5, 100))])
           LogicalTableScan(table=[[scott, EMP]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCorrelatedScalarSubQueryInProject">
+    <Resource name="sql">
+      <![CDATA[SELECT t1.ename, (SELECT count(1) FROM emp t2 WHERE t2.ename = t1.ename) FROM emp t1]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(variablesSet=[[$cor0]], ENAME=[$1], EXPR$1=[$SCALAR_QUERY({
+LogicalAggregate(group=[{}], EXPR$0=[COUNT()])
+  LogicalProject($f0=[1])
+    LogicalFilter(condition=[=($1, $cor0.ENAME)])
+      LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+})])
+  LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(ENAME=[$1], EXPR$1=[$9])
+  LogicalCorrelate(correlation=[$cor0], joinType=[left], requiredColumns=[{1}])
+    LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+    LogicalAggregate(group=[{}], EXPR$0=[COUNT()])
+      LogicalProject($f0=[1])
+        LogicalFilter(condition=[=($1, $cor0.ENAME)])
+          LogicalTableScan(table=[[CATALOG, SALES, EMP]])
 ]]>
     </Resource>
   </TestCase>
@@ -10958,17 +11206,16 @@ select name, deptno from dept
       <![CDATA[
 LogicalMinus(all=[true])
   LogicalProject(NAME=[$0], DEPTNO=[$1])
-    LogicalAggregate(group=[{0, 1}], EXPR$2=[COUNT()])
-      LogicalProject(NAME=[$1], DEPTNO=[$0], $f2=[1])
-        LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
-  LogicalProject(NAME=[$0], DEPTNO=[$1])
-    LogicalProject(NAME=[$1], DEPTNO=[$0], EXPR$2=[1:BIGINT])
-      LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
-  LogicalMinus(all=[true])
-    LogicalProject(NAME=[$0], DEPTNO=[$1])
+    LogicalMinus(all=[true])
+      LogicalAggregate(group=[{0, 1}], EXPR$2=[COUNT()])
+        LogicalProject(NAME=[$1], DEPTNO=[$0], $f2=[1])
+          LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
       LogicalProject(NAME=[$1], DEPTNO=[$0], EXPR$2=[1:BIGINT])
         LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
-    LogicalProject(NAME=[$0], DEPTNO=[$1])
+  LogicalProject(NAME=[$0], DEPTNO=[$1])
+    LogicalMinus(all=[true])
+      LogicalProject(NAME=[$1], DEPTNO=[$0], EXPR$2=[1:BIGINT])
+        LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
       LogicalAggregate(group=[{0, 1}], EXPR$2=[COUNT()])
         LogicalProject(NAME=[$1], DEPTNO=[$0], $f2=[1])
           LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
@@ -12989,6 +13236,30 @@ LogicalProject(DEPTNO=[$7], F1=[$9], F2=[$10])
   LogicalWindow(window#0=[window(order by [0] aggs [LAST_VALUE($7)])])
     LogicalWindow(window#0=[window(order by [0] aggs [FIRST_VALUE($7)])])
       LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testProjectUncollectMergeDropOrdinality">
+    <Resource name="sql">
+      <![CDATA[select t1.name, t2.admin
+from DEPT_NESTED_EXPANDED as t1,
+unnest(t1.admins) WITH ORDINALITY as t2(admin, rn)]]>
+    </Resource>
+    <Resource name="planBefore">
+      <![CDATA[
+LogicalProject(NAME=[$1], ADMIN=[$5])
+  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
+    Uncollect(withOrdinality=[true])
+      LogicalProject(ADMINS=[$cor0.ADMINS])
+        LogicalValues(tuples=[[{ 0 }]])
+]]>
+    </Resource>
+    <Resource name="planAfter">
+      <![CDATA[
+LogicalProject(NAME=[$0], ADMIN=[$1])
+  Uncollect(passthrough=[{1}], collectionFields=[{3}])
+    LogicalTableScan(table=[[CATALOG, SALES, DEPT_NESTED_EXPANDED]])
 ]]>
     </Resource>
   </TestCase>
